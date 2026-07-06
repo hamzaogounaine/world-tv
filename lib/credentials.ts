@@ -2,25 +2,51 @@
 import axios from 'axios';
 
 const GIST_URL = 'https://gist.githubusercontent.com/hamzaogounaine/1a69b8e0b2dc8c2bde00a832eaf54721/raw/credentials.json';
+const CACHE_DURATION = 10 * 1000; // 10 seconds
 
-// Global cache object (survives across hot-reloads and requests on the server)
-let cachedCredentials: any = null;
-let lastFetchedTime = 0;
-const CACHE_DURATION = 10 * 1000; // 10 seconds cache window
-let baseURL: string | null = null;
+// Multi-fallback built-in hardcoded string
+const FINAL_FALLBACK = "http://5.253.86.12/player_api.php?username=fallback&password=fallback";
 
-export async function getLiveCredentials() {
+// Maintain state across hot-reloads in Next.js dev mode
+interface CredentialCache {
+    cachedCredentials: any;
+    lastFetchedTime: number;
+    baseURL: string | null;
+}
+
+const globalForCredentials = global as unknown as {
+    credentialCache: CredentialCache;
+};
+
+if (!globalForCredentials.credentialCache) {
+    globalForCredentials.credentialCache = {
+        cachedCredentials: null,
+        lastFetchedTime: 0,
+        baseURL: null,
+    };
+}
+
+const cache = globalForCredentials.credentialCache;
+
+function buildPlayerApiUrl(creds: any): string {
+    if (!creds?.host_url || !creds?.username || !creds?.password) {
+        throw new Error("Invalid credentials payload structure");
+    }
+    return `${creds.host_url}/player_api.php?username=${creds.username}&password=${creds.password}`;
+}
+
+export async function getLiveCredentials(): Promise<string> {
     const now = Date.now();
 
-    // If cache is fresh, return it instantly
-    if (cachedCredentials && (now - lastFetchedTime < CACHE_DURATION)) {
-        if (baseURL) return baseURL;
-        baseURL = `${cachedCredentials.host_url}/player_api.php?username=${cachedCredentials.username}&password=${cachedCredentials.password}`;
-        return baseURL;
+    // 1. If cache is fresh, return it instantly
+    if (cache.cachedCredentials && (now - cache.lastFetchedTime < CACHE_DURATION)) {
+        if (cache.baseURL) return cache.baseURL;
+        cache.baseURL = buildPlayerApiUrl(cache.cachedCredentials);
+        return cache.baseURL;
     }
 
+    // 2. Fetch fresh details from Gist
     try {
-        // Appending a timestamp and dynamic headers completely defeats CDN caching
         const response = await axios.get(`${GIST_URL}?t=${now}`, {
             timeout: 5000,
             headers: {
@@ -31,23 +57,29 @@ export async function getLiveCredentials() {
             }
         });
 
+        // Axios automatically parses JSON response payloads into objects
         const credentials = response.data;
-       
-
-        cachedCredentials = JSON.parse(JSON.stringify(credentials));
-        lastFetchedTime = now;
-
-        baseURL = `${cachedCredentials.host_url}/player_api.php?username=${cachedCredentials.username}&password=${cachedCredentials.password}`;
-        return baseURL;
+        
+        cache.cachedCredentials = credentials;
+        cache.lastFetchedTime = now;
+        cache.baseURL = buildPlayerApiUrl(credentials);
+        
+        return cache.baseURL;
     } catch (err: any) {
         console.error("x Next.js Gist fetch failed, using fallback:", err.message);
-        if (cachedCredentials) {
-            if (baseURL) return baseURL;
-            baseURL = `${cachedCredentials.host_url}/player_api.php?username=${cachedCredentials.username}&password=${cachedCredentials.password}`;
-            return baseURL;
+        
+        // 3. Stale cache fallback if available
+        if (cache.cachedCredentials) {
+            if (cache.baseURL) return cache.baseURL;
+            try {
+                cache.baseURL = buildPlayerApiUrl(cache.cachedCredentials);
+                return cache.baseURL;
+            } catch {
+                return FINAL_FALLBACK;
+            }
         }
         
-        // Final fallback block
-        return "http://5.253.86.12/player_api.php?username=fallback&password=fallback";
+        // 4. Hardcoded terminal fallback
+        return FINAL_FALLBACK;
     }
 }
